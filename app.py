@@ -3,263 +3,188 @@ import pandas as pd
 import numpy as np
 from tax_uk import tax_and_ni_ruk
 
-st.set_page_config(page_title="Weekend Working Pay Impact", layout="wide")
+st.set_page_config(page_title="Sunday Working Pay Impact", layout="wide")
 
-# =========================
-# Inputs / constants
-# =========================
-CONTRACTED_HOURS_PER_WEEK = 37.5  # fixed per your instruction
+# -----------------------
+# Fixed assumptions
+# -----------------------
+CONTRACTED_HOURS_PER_WEEK = 37.5
 WEEKS_PER_YEAR = 52
-PAY_PERIODS_PER_YEAR = 12
 
-# Month approximation (you requested 4.3 weeks/month for user-facing framing)
-WEEKS_PER_MONTH_UI = 4.3
-SUNDAYS_PER_MONTH_AVG = 52 / 12  # used for fair-share maths (4.333...)
-
-# Staffing assumptions
 AFFECTED_FTE = 22
 STAFF_REQUIRED_PER_SUNDAY = 5
+SUNDAYS_PER_MONTH_AVG = 52 / 12  # 4.333...
 
-# Enhancements / hours
-SUNDAY_UPLIFT = 0.60  # 60% enhancement => 1.6x base
 NEW_SUNDAY_HOURS = 12.0
+SUNDAY_UPLIFT = 0.60              # enhancement-only portion
+DEFAULT_PENSION_RATE = 0.107
+
 DEFAULT_BANK_SUNDAY_HOURS = 10.5
 
-# Pension
-DEFAULT_PENSION_RATE = 0.107  # your default
-
-# Pay rates (April 2026 estimates provided)
 BANDS = {
     "Band 6": {
         "Entry": 20.44,
         "Mid": 21.57,
         "Top": 24.61,
-        "bank_sunday_rate": 44.70,  # assumed hourly bank rate
+        "bank_sunday_rate": 44.70,  # assumed hourly
     },
     "Band 7": {
         "Entry": 25.26,
-        "Mid": 26.56,  # assumed correction of "£26.56.70"
+        "Mid": 26.56,               # assumed correction
         "Top": 28.90,
-        "bank_sunday_rate": 51.48,  # assumed hourly bank rate
+        "bank_sunday_rate": 51.48,  # assumed hourly
     },
 }
 
-# Derived
 TOTAL_SUNDAY_SHIFTS_PER_MONTH = STAFF_REQUIRED_PER_SUNDAY * SUNDAYS_PER_MONTH_AVG
-FAIR_SHARE_SUNDAYS_PER_MONTH = TOTAL_SUNDAY_SHIFTS_PER_MONTH / AFFECTED_FTE  # default new Sundays/month
+FAIR_SHARE_SUNDAYS_PER_MONTH = TOTAL_SUNDAY_SHIFTS_PER_MONTH / AFFECTED_FTE
 
 
-# =========================
+# -----------------------
 # Helpers
-# =========================
+# -----------------------
 def money(x: float) -> str:
     return f"£{x:,.2f}"
 
-def calc_base_annual(hourly: float) -> float:
+
+def base_annual_salary(hourly: float) -> float:
     return hourly * CONTRACTED_HOURS_PER_WEEK * WEEKS_PER_YEAR
 
-def calc_current_bank_monthly(bank_sundays_per_month: float, bank_hours: float, bank_rate: float) -> float:
+
+def current_bank_monthly(bank_sundays_per_month: float, bank_hours: float, bank_rate: float) -> float:
+    # Current bank Sundays are extra pay on top of base salary (non-pensionable assumed)
     return bank_sundays_per_month * bank_hours * bank_rate
 
-def calc_new_sundays_monthly(new_sundays_per_month: float, base_hourly: float) -> float:
-    return new_sundays_per_month * NEW_SUNDAY_HOURS * base_hourly * (1.0 + SUNDAY_UPLIFT)
 
-def calc_annual_leave_uplift_monthly(new_sundays_per_month: float, base_hourly: float, annual_leave_weeks: float) -> float:
-    """
-    Approximation: treat enhancement value as averaged over year and applied to annual leave weeks.
-    Enhancement-only portion per Sunday = 12h * base * 0.60
-    """
-    enhancement_per_sunday = NEW_SUNDAY_HOURS * base_hourly * SUNDAY_UPLIFT
-    sundays_per_year = new_sundays_per_month * 12
-    annual_enhancement_total = sundays_per_year * enhancement_per_sunday
+def new_enhancement_monthly(new_sundays_per_month: float, base_hourly: float) -> float:
+    # New system: Sundays are within 37.5h, so only enhancement portion is additional pay
+    return new_sundays_per_month * NEW_SUNDAY_HOURS * base_hourly * SUNDAY_UPLIFT
 
-    weekly_avg_enh = annual_enhancement_total / 52
-    annual_leave_uplift = weekly_avg_enh * annual_leave_weeks
+
+def annual_leave_uplift_monthly(enhancement_monthly: float, annual_leave_weeks: float) -> float:
+    # simple approximation based on averaged enhancement over year
+    annual_enh = enhancement_monthly * 12
+    weekly_avg = annual_enh / 52
+    annual_leave_uplift = weekly_avg * annual_leave_weeks
     return annual_leave_uplift / 12
 
-def compute_monthly_takehome(
+
+def compute_monthly_outcome(
     base_hourly: float,
-    bank_sundays_per_month: float,
+    current_bank_sundays: float,
     bank_hours: float,
     bank_rate: float,
-    new_sundays_per_month: float,
+    new_sundays: float,
     pension_rate: float,
     include_leave_uplift: bool,
-    annual_leave_weeks: float
+    annual_leave_weeks: float,
 ) -> dict:
-    base_annual = calc_base_annual(base_hourly)
-    base_monthly = base_annual / 12
+    base_monthly = base_annual_salary(base_hourly) / 12
 
-    current_weekend_monthly = calc_current_bank_monthly(bank_sundays_per_month, bank_hours, bank_rate)
-    new_weekend_monthly = calc_new_sundays_monthly(new_sundays_per_month, base_hourly)
+    current_bank_pay_m = current_bank_monthly(current_bank_sundays, bank_hours, bank_rate)
 
-    leave_uplift_monthly = 0.0
-    if include_leave_uplift:
-        leave_uplift_monthly = calc_annual_leave_uplift_monthly(new_sundays_per_month, base_hourly, annual_leave_weeks)
+    new_enh_m = new_enhancement_monthly(new_sundays, base_hourly)
+    leave_uplift_m = annual_leave_uplift_monthly(new_enh_m, annual_leave_weeks) if include_leave_uplift else 0.0
 
-    # Gross totals
-    current_gross_monthly = base_monthly + current_weekend_monthly
-    new_gross_monthly = base_monthly + new_weekend_monthly + leave_uplift_monthly
+    current_gross_m = base_monthly + current_bank_pay_m
+    new_gross_m = base_monthly + new_enh_m + leave_uplift_m
 
-    # Pension:
-    # - Current bank Sundays assumed non-pensionable
-    # - New Sunday earnings + leave uplift assumed pensionable
-    current_pension_monthly = 0.0
-    new_pension_monthly = pension_rate * (new_weekend_monthly + leave_uplift_monthly)
+    # Incremental pension: enhancement (+ leave uplift) becomes pensionable; base already pensionable anyway.
+    current_pension_m = 0.0
+    new_pension_m = pension_rate * (new_enh_m + leave_uplift_m)
 
-    # Annualise for tax model
-    current_gross_annual = current_gross_monthly * 12
-    new_gross_annual = new_gross_monthly * 12
-    current_pension_annual = current_pension_monthly * 12
-    new_pension_annual = new_pension_monthly * 12
+    # Annualise for simplified tax/NI
+    current_gross_a = current_gross_m * 12
+    new_gross_a = new_gross_m * 12
+    current_pension_a = current_pension_m * 12
+    new_pension_a = new_pension_m * 12
 
-    current_tax = tax_and_ni_ruk(current_gross_annual, pension_deduction=current_pension_annual)
-    new_tax = tax_and_ni_ruk(new_gross_annual, pension_deduction=new_pension_annual)
+    current_tax = tax_and_ni_ruk(current_gross_a, pension_deduction=current_pension_a)
+    new_tax = tax_and_ni_ruk(new_gross_a, pension_deduction=new_pension_a)
 
-    current_takehome_annual = current_gross_annual - current_pension_annual - current_tax.income_tax - current_tax.employee_ni
-    new_takehome_annual = new_gross_annual - new_pension_annual - new_tax.income_tax - new_tax.employee_ni
+    current_takehome_a = current_gross_a - current_pension_a - current_tax.income_tax - current_tax.employee_ni
+    new_takehome_a = new_gross_a - new_pension_a - new_tax.income_tax - new_tax.employee_ni
 
     return {
         "base_monthly": base_monthly,
-        "current_weekend_monthly": current_weekend_monthly,
-        "new_weekend_monthly": new_weekend_monthly,
-        "leave_uplift_monthly": leave_uplift_monthly,
-        "current_gross_monthly": current_gross_monthly,
-        "new_gross_monthly": new_gross_monthly,
-        "current_pension_monthly": current_pension_monthly,
-        "new_pension_monthly": new_pension_monthly,
-        "current_takehome_monthly": current_takehome_annual / 12,
-        "new_takehome_monthly": new_takehome_annual / 12,
-        "current_tax_annual": current_tax.income_tax,
-        "new_tax_annual": new_tax.income_tax,
-        "current_ni_annual": current_tax.employee_ni,
-        "new_ni_annual": new_tax.employee_ni,
-        "current_gross_annual": current_gross_annual,
-        "new_gross_annual": new_gross_annual,
-        "current_pension_annual": current_pension_annual,
-        "new_pension_annual": new_pension_annual,
-        "current_takehome_annual": current_takehome_annual,
-        "new_takehome_annual": new_takehome_annual,
+        "current_bank_pay_m": current_bank_pay_m,
+        "new_enh_m": new_enh_m,
+        "leave_uplift_m": leave_uplift_m,
+        "current_gross_m": current_gross_m,
+        "new_gross_m": new_gross_m,
+        "current_pension_m": current_pension_m,
+        "new_pension_m": new_pension_m,
+        "current_takehome_m": current_takehome_a / 12,
+        "new_takehome_m": new_takehome_a / 12,
     }
 
 
-# =========================
-# Monte Carlo simulation
-# =========================
-def simulate_sundays_per_month_distribution(
+# -----------------------
+# FAST simulation (vectorised multinomial) + cache
+# -----------------------
+@st.cache_data(show_spinner=False)
+def simulate_sundays_fast(
     n_staff: int,
     staff_required_per_sunday: int,
     opt_out_count: int,
     keen_count: int,
     keen_weight: float,
-    normal_weight: float,
     n_sims: int,
     seed: int,
-    person_type: str
+    person_type: str,
 ) -> np.ndarray:
     """
-    Simulate allocation of Sunday shifts across staff using a simple swap-market model:
-
-    - Each month has about: staff_required_per_sunday * 52/12 total shifts (rounded to nearest int).
-    - opt_out staff take 0 by definition
-    - keen staff have higher probability ("weight") of being allocated a shift when swaps happen
-    - everyone else shares the remainder
-
-    person_type:
-      - "Average sharer" => a random non-opt-out, non-keen person
-      - "Keen (picks up extras)" => a random keen person
-      - "Opt-out (does none)" => always 0
+    Each month we allocate total_shifts (≈22) across staff using weighted probabilities.
+    We repeat for 12 months and average Sundays/month for a representative person.
     """
     rng = np.random.default_rng(seed)
     total_shifts = int(np.round(staff_required_per_sunday * (52 / 12)))  # ~22
-    months_per_run = 12  # simulate a "year" then average per month
+    months = 12
 
-    if opt_out_count < 0:
-        opt_out_count = 0
-    opt_out_count = min(opt_out_count, n_staff)
-
+    opt_out_count = int(np.clip(opt_out_count, 0, n_staff))
     remaining = n_staff - opt_out_count
-    keen_count = min(max(0, keen_count), remaining)
+    keen_count = int(np.clip(keen_count, 0, remaining))
 
-    # Indices: [0..opt_out-1] are opt-out; next keen_count are keen; rest are normal
-    # Pick a representative person index based on person_type
-    if person_type == "Opt-out (does none)":
-        # representative opt-out person
-        if opt_out_count == 0:
-            # if none opt out, treat as average
-            person_type = "Average sharer"
-        else:
-            target_index = 0
-
-    if person_type == "Keen (picks up extras)":
-        if keen_count == 0:
-            person_type = "Average sharer"
-        else:
-            target_index = opt_out_count  # first keen
-
-    if person_type == "Average sharer":
-        # pick first normal if available; else fall back to keen; else opt-out
-        if remaining - keen_count > 0:
-            target_index = opt_out_count + keen_count  # first normal
-        elif keen_count > 0:
-            target_index = opt_out_count
-        else:
-            target_index = 0
-
-    # weights for non-opt-out people
-    weights = np.zeros(n_staff, dtype=float)
-    # opt-outs remain 0
-    # keen
+    # weights
+    w = np.zeros(n_staff, dtype=float)
     if keen_count > 0:
-        weights[opt_out_count:opt_out_count + keen_count] = keen_weight
-    # normal
+        w[opt_out_count:opt_out_count + keen_count] = keen_weight
     if remaining - keen_count > 0:
-        weights[opt_out_count + keen_count:] = normal_weight
+        w[opt_out_count + keen_count:] = 1.0
 
-    # Hard cap per person per month: can't do more Sundays than exist; also avoids weird concentration
-    # With ~4.33 Sundays/month and 5 required each Sunday, it's plausible some people do 3-4/month but rare.
-    cap_per_person = min(total_shifts, 4)  # conservative cap
+    if w.sum() == 0:
+        return np.zeros(n_sims, dtype=float)
 
-    results = np.zeros(n_sims, dtype=float)
+    p = w / w.sum()
 
-    for sim in range(n_sims):
-        monthly_counts = []
+    # representative target
+    if person_type == "Opt-out":
+        target = 0 if opt_out_count > 0 else (opt_out_count + keen_count if remaining - keen_count > 0 else opt_out_count)
+    elif person_type == "Keen":
+        target = opt_out_count if keen_count > 0 else (opt_out_count + keen_count if remaining - keen_count > 0 else 0)
+    else:  # Average
+        if remaining - keen_count > 0:
+            target = opt_out_count + keen_count
+        elif keen_count > 0:
+            target = opt_out_count
+        else:
+            target = 0
 
-        for _m in range(months_per_run):
-            counts = np.zeros(n_staff, dtype=int)
-
-            for _shift in range(total_shifts):
-                eligible = (weights > 0) & (counts < cap_per_person)
-                if not np.any(eligible):
-                    # If everyone hit cap (unlikely with chosen cap), relax cap slightly for this month
-                    eligible = weights > 0
-                    if not np.any(eligible):
-                        break
-
-                probs = weights[eligible] / weights[eligible].sum()
-                chosen_local = rng.choice(np.where(eligible)[0], p=probs)
-                counts[chosen_local] += 1
-
-            monthly_counts.append(counts[target_index])
-
-        # average Sundays per month for that simulated year
-        results[sim] = float(np.mean(monthly_counts))
-
-    return results
+    draws = rng.multinomial(total_shifts, p, size=(n_sims, months))  # (n_sims, months, n_staff)
+    return draws[:, :, target].mean(axis=1)
 
 
-# =========================
+# -----------------------
 # UI
-# =========================
-st.title("Weekend Working Pay Impact (Illustrative)")
-
+# -----------------------
+st.title("Sunday Working Pay Impact (simple, individual-facing)")
 st.caption(
-    "Illustrative tool only. Tax/NI are simplified and cannot reflect all circumstances "
-    "(tax codes, Scottish tax, student loans, salary sacrifice, multiple jobs, etc.)."
+    "Illustrative tool. Uses simplified annualised UK tax/NI. "
+    "Does not include tax codes, Scottish tax, student loans, salary sacrifice, etc."
 )
 
 with st.sidebar:
-    st.header("Your role / pay point")
+    st.header("Pay point")
     band = st.selectbox("Band", list(BANDS.keys()))
     point = st.selectbox("Pay point", ["Entry", "Mid", "Top"])
     base_hourly = float(BANDS[band][point])
@@ -267,167 +192,133 @@ with st.sidebar:
 
     st.divider()
     st.header("Current system (monthly)")
-    current_bank_sundays = st.slider("Bank Sundays per month", 0.0, 6.0, 1.0, 0.25)
-    bank_hours = st.slider("Average hours claimed per bank Sunday", 6.0, 12.0, DEFAULT_BANK_SUNDAY_HOURS, 0.25)
+    current_bank_sundays = st.slider("Bank Sundays per month (extra work)", 0.0, 6.0, 1.0, 0.25)
+    bank_hours = st.slider("Avg hours per bank Sunday", 6.0, 12.0, DEFAULT_BANK_SUNDAY_HOURS, 0.25)
 
     st.divider()
     st.header("New system (monthly)")
     default_new = float(np.round(FAIR_SHARE_SUNDAYS_PER_MONTH, 2))
-    new_sundays = st.slider(
-        "Expected Sundays per month under new system",
-        0.0, 6.0, default_new, 0.25
-    )
+    new_sundays = st.slider("Contracted Sundays per month (within 37.5h)", 0.0, 6.0, default_new, 0.25)
 
     st.divider()
-    st.header("Pension + leave assumptions")
-    pension_rate = st.slider("NHS pension rate (assumed)", 0.0, 0.20, DEFAULT_PENSION_RATE, 0.001)
-    include_leave_uplift = st.checkbox("Include annual leave uplift approximation (new system only)", value=True)
+    st.header("Pension + leave")
+    pension_rate = st.slider("Pension rate (assumed)", 0.0, 0.20, DEFAULT_PENSION_RATE, 0.001)
+    include_leave_uplift = st.checkbox("Include annual leave uplift approximation", value=True)
     annual_leave_weeks = st.slider("Annual leave weeks/year (assumed)", 4.0, 8.0, 6.5, 0.5)
 
     st.divider()
-    st.header("Simulation (swap market)")
-    sim_on = st.toggle("Show Monte Carlo simulation", value=False)
-
+    st.header("Simulation")
+    sim_on = st.toggle("Run simulation (swap market)", value=False)
+    run_sim = False
     if sim_on:
-        person_type = st.selectbox(
-            "Which best describes you?",
-            ["Average sharer", "Keen (picks up extras)", "Opt-out (does none)"]
-        )
-        opt_out_count = st.slider("How many staff opt out of Sundays entirely?", 0, AFFECTED_FTE, 4)
-        keen_count = st.slider("How many staff are keen to pick up extra Sundays?", 0, AFFECTED_FTE, 6)
-        keen_weight = st.slider("How much more likely keen staff pick up swaps?", 1.0, 5.0, 2.0, 0.1)
-        n_sims = st.slider("Simulation runs", 500, 20000, 5000, 500)
-        seed = st.number_input("Random seed (for repeatable results)", value=42, step=1)
+        person_type = st.selectbox("I am…", ["Average", "Keen", "Opt-out"])
+        opt_out_count = st.slider("How many staff opt out?", 0, AFFECTED_FTE, 4)
+        keen_count = st.slider("How many staff are keen for extras?", 0, AFFECTED_FTE, 6)
+        keen_weight = st.slider("Keen likelihood multiplier", 1.0, 5.0, 2.0, 0.1)
+        n_sims = st.slider("Simulation runs (speed vs smoothness)", 500, 10000, 2000, 500)
+        seed = st.number_input("Random seed (repeatability)", value=42, step=1)
+        run_sim = st.button("Run simulation")
 
-# =========================
-# Core calculation (manual slider)
-# =========================
-res = compute_monthly_takehome(
+
+# -----------------------
+# Manual comparison
+# -----------------------
+res = compute_monthly_outcome(
     base_hourly=base_hourly,
-    bank_sundays_per_month=current_bank_sundays,
+    current_bank_sundays=current_bank_sundays,
     bank_hours=bank_hours,
     bank_rate=bank_rate,
-    new_sundays_per_month=new_sundays,
+    new_sundays=new_sundays,
     pension_rate=pension_rate,
     include_leave_uplift=include_leave_uplift,
     annual_leave_weeks=annual_leave_weeks,
 )
 
-delta_gross = res["new_gross_monthly"] - res["current_gross_monthly"]
-delta_takehome = res["new_takehome_monthly"] - res["current_takehome_monthly"]
-delta_pension = res["new_pension_monthly"] - res["current_pension_monthly"]
+df = pd.DataFrame(
+    [
+        ["Base pay (37.5h)", res["base_monthly"], res["base_monthly"], 0.0],
+        ["Current: bank Sunday pay", res["current_bank_pay_m"], 0.0, -res["current_bank_pay_m"]],
+        ["New: Sunday enhancement (extra 60%)", 0.0, res["new_enh_m"], res["new_enh_m"]],
+        ["New: annual leave uplift (approx.)", 0.0, res["leave_uplift_m"], res["leave_uplift_m"]],
+        ["Gross total", res["current_gross_m"], res["new_gross_m"], res["new_gross_m"] - res["current_gross_m"]],
+        ["Incremental pension deduction", res["current_pension_m"], res["new_pension_m"], res["new_pension_m"]],
+        ["Take-home (after tax/NI/pension)", res["current_takehome_m"], res["new_takehome_m"], res["new_takehome_m"] - res["current_takehome_m"]],
+    ],
+    columns=["Line", "Current (monthly)", "New (monthly)", "Change"],
+)
 
-# =========================
-# Display
-# =========================
-col1, col2 = st.columns([1.2, 0.8], gap="large")
+st.subheader("Manual comparison (monthly)")
+st.dataframe(
+    df.style.format({"Current (monthly)": money, "New (monthly)": money, "Change": money}),
+    use_container_width=True,
+    hide_index=True,
+)
 
-with col1:
-    st.subheader("Manual comparison (based on your Sunday inputs)")
-
-    df = pd.DataFrame(
-        [
-            ["Base pay (estimated)", res["base_monthly"], res["base_monthly"], 0.0],
-            ["Sunday pay", res["current_weekend_monthly"], res["new_weekend_monthly"], res["new_weekend_monthly"] - res["current_weekend_monthly"]],
-            ["Annual leave uplift (approx.)", 0.0, res["leave_uplift_monthly"], res["leave_uplift_monthly"]],
-            ["Gross total", res["current_gross_monthly"], res["new_gross_monthly"], delta_gross],
-            ["Pension deduction (assumed)", res["current_pension_monthly"], res["new_pension_monthly"], delta_pension],
-            ["Take-home (after tax/NI/pension)", res["current_takehome_monthly"], res["new_takehome_monthly"], delta_takehome],
-        ],
-        columns=["Line", "Current (monthly)", "New (monthly)", "Change"],
-    )
-
-    st.dataframe(
-        df.style.format(
-            {
-                "Current (monthly)": money,
-                "New (monthly)": money,
-                "Change": money,
-            }
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-with col2:
-    st.subheader("Context")
-    st.write(f"- **{band} / {point}** base hourly: **{money(base_hourly)}**")
-    st.write(f"- Base salary estimate (37.5h): **{money(res['base_monthly'])} / month**")
-    st.write(f"- Fair-share Sundays/month (22 staff, 5 required): **{FAIR_SHARE_SUNDAYS_PER_MONTH:.2f}**")
-    st.write(f"- Current bank Sunday rate assumed hourly: **{money(bank_rate)}**")
-    st.info(
-        "If your take-home decreases while pension increases: "
-        "that’s usually because the new payments are pensionable (and tax interacts differently). "
-        "This tool is for direction-of-travel, not exact payroll."
-    )
+st.write(f"Fair-share default Sundays/month (22 staff, 5 required): **{FAIR_SHARE_SUNDAYS_PER_MONTH:.2f}**")
 
 st.divider()
 
-# =========================
+# -----------------------
 # Simulation section
-# =========================
-if sim_on:
-    st.subheader("Monte Carlo simulation: likely Sundays/month for someone like you")
-
-    sims = simulate_sundays_per_month_distribution(
-        n_staff=AFFECTED_FTE,
-        staff_required_per_sunday=STAFF_REQUIRED_PER_SUNDAY,
-        opt_out_count=opt_out_count,
-        keen_count=keen_count,
-        keen_weight=keen_weight,
-        normal_weight=1.0,
-        n_sims=int(n_sims),
-        seed=int(seed),
-        person_type=person_type,
-    )
+# -----------------------
+if sim_on and run_sim:
+    with st.spinner("Running simulation…"):
+        sims = simulate_sundays_fast(
+            n_staff=AFFECTED_FTE,
+            staff_required_per_sunday=STAFF_REQUIRED_PER_SUNDAY,
+            opt_out_count=opt_out_count,
+            keen_count=keen_count,
+            keen_weight=keen_weight,
+            n_sims=int(n_sims),
+            seed=int(seed),
+            person_type=person_type,
+        )
 
     p10, p50, p90 = np.percentile(sims, [10, 50, 90])
 
+    st.subheader("Simulation results (likely Sundays/month for someone like you)")
     st.write(
-        f"Based on these assumptions, a **{person_type}** might work approximately:\n\n"
-        f"- **10th percentile:** {p10:.2f} Sundays/month\n"
-        f"- **Median:** {p50:.2f} Sundays/month\n"
-        f"- **90th percentile:** {p90:.2f} Sundays/month"
+        f"- **10th percentile:** {p10:.2f}\n"
+        f"- **Median:** {p50:.2f}\n"
+        f"- **90th percentile:** {p90:.2f}"
     )
 
-    # Show histogram
-    hist_df = pd.DataFrame({"Simulated Sundays/month": sims})
-    st.bar_chart(hist_df.value_counts().sort_index())
+    # Histogram without Streamlit/Pandas index weirdness
+    bins = np.arange(-0.25, 6.25, 0.25)
+    counts, edges = np.histogram(sims, bins=bins)
+    centers = (edges[:-1] + edges[1:]) / 2
+    chart_df = pd.DataFrame({"Sundays/month": centers, "Count": counts})
+    st.bar_chart(chart_df.set_index("Sundays/month"))
 
-    st.subheader("What that might mean for pay (range)")
-    # Compute pay impact for p10/p50/p90 (holding current bank Sundays fixed, and only varying new Sundays)
-    scenarios = []
+    st.subheader("What that could mean for take-home (range)")
+    rows = []
     for label, s in [("P10", p10), ("Median", p50), ("P90", p90)]:
-        r = compute_monthly_takehome(
+        r = compute_monthly_outcome(
             base_hourly=base_hourly,
-            bank_sundays_per_month=current_bank_sundays,
+            current_bank_sundays=current_bank_sundays,
             bank_hours=bank_hours,
             bank_rate=bank_rate,
-            new_sundays_per_month=float(s),
+            new_sundays=float(s),
             pension_rate=pension_rate,
             include_leave_uplift=include_leave_uplift,
             annual_leave_weeks=annual_leave_weeks,
         )
-        scenarios.append(
+        rows.append(
             {
                 "Scenario": label,
-                "New Sundays/month": float(s),
-                "Gross (new, monthly)": r["new_gross_monthly"],
-                "Take-home (new, monthly)": r["new_takehome_monthly"],
-                "Change vs current take-home": r["new_takehome_monthly"] - r["current_takehome_monthly"],
-                "Pension (new, monthly)": r["new_pension_monthly"],
+                "Contracted Sundays/month": float(s),
+                "New take-home (monthly)": r["new_takehome_m"],
+                "Change vs current take-home": r["new_takehome_m"] - res["current_takehome_m"],
             }
         )
 
-    scen_df = pd.DataFrame(scenarios)
+    out_df = pd.DataFrame(rows)
     st.dataframe(
-        scen_df.style.format(
+        out_df.style.format(
             {
-                "Gross (new, monthly)": money,
-                "Take-home (new, monthly)": money,
+                "Contracted Sundays/month": "{:.2f}",
+                "New take-home (monthly)": money,
                 "Change vs current take-home": money,
-                "Pension (new, monthly)": money,
-                "New Sundays/month": "{:.2f}",
             }
         ),
         use_container_width=True,
@@ -435,12 +326,12 @@ if sim_on:
     )
 
 st.divider()
-st.subheader("Caveats (please read)")
+st.subheader("Caveats")
 st.markdown(
     """
-- **Tax/NI** are simplified (annualised) and may differ from payroll calculations per pay period.
-- Not included: **Scottish income tax**, **student loans**, **salary sacrifice**, **benefits**, **multiple jobs**, etc.
-- **Sickness pay uplift** may exist if Sunday enhancements become contractual, but is not modelled.
-- **Annual leave uplift** here is an approximation; real calculations depend on the preceding weeks’ averages.
+- Illustrative only. Tax/NI are simplified and annualised.
+- Not included: Scottish tax, student loans, salary sacrifice, benefits, multiple jobs, tax codes, childcare, etc.
+- Annual leave uplift is an approximation based on averaged enhancements.
+- Sickness pay uplift may exist under contractual enhancements but is not modelled.
 """
 )
